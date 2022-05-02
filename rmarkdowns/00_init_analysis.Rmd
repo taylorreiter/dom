@@ -1,0 +1,334 @@
+---
+title: "Initial analysis of domestication gut microbiome samples"
+author: "Taylor Reiter"
+date: "11/15/2019"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+```
+
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(ggrepel)
+library(stringr)
+library(plotly)
+```
+
+
+## Non-host DNA makes up a small proportion of total sequencing reads
+
+I sorted reads into "host" and "non-host", where "host" reads contained at least 
+one k-mer (k = 31) present in the host reference genome for each species. Below 
+I show the number of reads for host vs. non-host fastq files. Only one sample,
+"RAY_NYC_2", contained a high number of host reads. 
+
+```{r bbduk, fig.width = 15}
+sizes <- read_tsv("outputs/bbduk_fastqc/multiqc_data/multiqc_fastqc.txt")
+sizes <- separate(sizes, col = Sample, into = c("sample", "host"), sep = "\\.")
+colnames(sizes) <- c('sample', 'host', 'filename', 'filetype', 'encoding',
+                     'total_sequences', 'sequences_flagged_as_poor_quality', 
+                     'sequence_length', '%GC', 'total_deduplicated_percentage',
+                     'avg_sequence_length', 'basic_statistics',
+                     'per_base_sequence_quality', 'per_tile_sequence_quality',
+                     'per_sequence_quality_scores', 'per_base_sequence_content',
+                     'per_sequence_gc_content', 'per_base_n_content',
+                     'sequence_length_distribution', 'sequence_duplication_levels',
+                     'overrepresented_sequences', 'adapter_content')
+sizes$sample <- gsub(".{3}$", "", sizes$sample)
+ggplot(sizes, aes(x = sample, y = total_sequences, fill = host)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Sample", y = "Reads", title = "Reads designated as host or non-host DNA") +
+  scale_fill_brewer(palette = "Paired", labels = c("Host", "Non-host, total"))
+```
+
+## PCoA does not recapitulate 16s rRNA clustering
+
+An PCoA plot of all non-host k-mers (including both identifiable and 
+non-identifiable k-mers) shows that samples cluster differently than amplicon
+sequencing data. Species are not in distinct clusters, and a small amount of 
+variation is described by the first principal component. 
+
+```{r comp_input}
+info <- read.csv("inputs/2019_09_09_domestication_metagenomics_meta.csv",
+                 stringsAsFactors = F)               # read in metadata
+comp <- read.csv("outputs/comp/comp_nohost.csv")     # read in mat
+rownames(comp) <- colnames(comp)                     # Label the rows
+```
+
+```{r comp_obsv}
+obv_info <- filter(info, Observational_comparison == "y") # filter to obs
+obv <- comp %>%
+  select(obv_info$SampleID) %>%                           # select columns
+  t() %>%                                                 # transpose
+  as.data.frame() %>%
+  select(obv_info$SampleID)                        # select cols again
+
+# OBSERVATIONAL
+obv <- as.matrix(obv)                              # Transform for plotting
+dist <- dist(obv)                                  # compute distances
+fit_all <- cmdscale(dist, eig = T)                 # calculate MDS
+fit <- as.data.frame(fit_all$points)
+fit$sample <- rownames(fit)
+
+colnames(fit) <- c("dim1", "dim2", "sample")       # set column names
+fit <- as.data.frame(fit)                          # transform to dataframe
+fit$SampleID <- rownames(fit)                      # record sample in df
+fit <- left_join(fit, obv_info, by = "SampleID")   # join with metadata
+
+var <- round(fit_all$eig*100/sum(fit_all$eig), 1)
+
+obv_plt <- ggplot(fit, aes(x = dim1, y = dim2, color = Status, 
+                           shape = Diet_type, label = SampleID)) +
+  geom_point() +
+  theme_minimal() +
+  ggtitle("Observational") +
+  labs(x = paste0("PCo 1 (", var[1], "%)"),
+       y = paste0("PCo 2 (", var[2], "%)"))
+
+ggplotly(obv_plt) # interactive html plot
+```
+
+```{r comp_canid}
+# CANID
+canid_info <- filter(info, Canid_diet_experiment == "y")
+canid <- comp %>%
+  select(canid_info$SampleID) %>%                  # select columns
+  t() %>%                                          # transpose
+  as.data.frame() %>%
+  select(canid_info$SampleID)                      # select cols again
+
+canid <- as.matrix(canid)                          # Transform for plotting
+dist <- dist(canid)                                # compute distances
+fit_all <- cmdscale(dist, eig = T)                 # calculate MDS
+fit <- as.data.frame(fit_all$points)
+fit$sample <- rownames(fit)
+colnames(fit) <- c("dim1", "dim2", "sample")       # set column names
+fit <- as.data.frame(fit)                          # transform to dataframe
+fit$SampleID <- rownames(fit)                      # record sample in df
+fit <- left_join(fit, canid_info, by = "SampleID") # join with metadata
+
+var <- round(fit_all$eig*100/sum(fit_all$eig), 1)  # calc % var explained
+
+canid_plt <- ggplot(fit, aes(x = dim1, y = dim2, color = Species, 
+                             shape = Experiment_diettreatment, label = SampleID)) +
+  geom_point() +
+  theme_minimal() +
+  ggtitle("Canid Experimental") +
+  labs(x = paste0("PCo 1 (", var[1], "%)"),
+       y = paste0("PCo 2 (", var[2], "%)"))
+
+ggplotly(canid_plt) # interactive html plot
+```
+
+```{r comp_mouse}
+mouse_info <- filter(info, Mouse_diet_experiment == "y")  # filter to obs
+mouse <- comp %>%
+  select(mouse_info$SampleID) %>%                         # select columns
+  t() %>%                                                 # transpose
+  as.data.frame() %>%
+  select(mouse_info$SampleID)                             # select cols again
+
+# MOUSE
+mouse <- as.matrix(mouse)                          # Transform for plotting
+dist <- dist(mouse)                                # compute distances
+fit_all <- cmdscale(dist, eig = T)                 # calculate MDS
+fit <- as.data.frame(fit_all$points)
+fit$sample <- rownames(fit)
+colnames(fit) <- c("dim1", "dim2", "sample")       # set column names
+fit <- as.data.frame(fit)                          # transform to dataframe
+fit$SampleID <- rownames(fit)                      # record sample in df
+fit <- left_join(fit, mouse_info, by = "SampleID") # join with metadata
+
+var <- round(fit_all$eig*100/sum(fit_all$eig), 1)  # calc % var explained
+
+mouse_plt <- ggplot(fit, aes(x = dim1, y = dim2, color = Species, 
+                             shape = Experiment_diettreatment, label = SampleID)) +
+  geom_point() +
+  theme_minimal() +
+  ggtitle("Mouse Experimental") +
+  labs(x = paste0("PCo 1 (", var[1], "%)"),
+       y = paste0("PCo 2 (", var[2], "%)"))
+
+ggplotly(mouse_plt) # interactive html plot
+```
+
+
+## Taxonomic composition of gut microbiome samples 
+
+I used sourmash gather to estimate the proportion of each sample that matches 
+any microbial genome in GenBank using k-mers. I used a k-size of 51 as it 
+approximates strain-level resolution, however with a loss of sensitivity. This
+means that if sourmash returns a match that is present in very low proportion 
+in the sample, this could either reflect that the species is truly lowly 
+abundant in the sample, or that the species that is present in the sample is
+distantly related to the thing it matched. The latter is probably the case with
+most matches we see below.
+
+```{r gather_all}
+files <- list.files("outputs/gather", ".csv$", full.names = T)
+files_short <- list.files("outputs/gather", ".csv$")
+files_short <- gsub(".csv", "", files_short)
+
+gather <- lapply(files, read_csv)
+for(i in 1:length(gather)){
+  sample <- rep(files_short[i], nrow(gather[[i]]))
+  gather[[i]]$sample <- sample
+}
+
+gather <- do.call(rbind, gather)
+gather <- left_join(gather, info, by = c("sample" = "SampleID"))
+```
+
+```{r tax_obs, fig.width = 10}
+obs <- gather %>%  
+  filter(Observational_comparison == "y") %>% 
+  filter(Mouse_diet_experiment != "y") %>%
+  filter(Canid_diet_experiment != "y")
+
+obs$name <- gsub(",.*", "", obs$name)
+obs <- separate(obs, col = name, 
+                into = c("strain", "genus", "species", "species2"), 
+                sep = " ", extra = "warn")
+obs$species <- ifelse(obs$species == "sp.", obs$species2, obs$species)
+
+ggplotly(ggplot(obs, aes(x = sample, y = f_unique_weighted, fill = genus, label = species)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "Sample", y = "Proportion of Sample", 
+       title = "Proportion of sample matching known genomes") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+```
+
+```{r tax_mouse, fig.width = 10}
+mouse <- filter(gather, Mouse_diet_experiment == "y")
+mouse$name <- gsub(",.*", "", mouse$name)
+mouse <- separate(mouse, col = name, 
+                into = c("strain", "genus", "species", "species2"), 
+                sep = " ", extra = "warn")
+mouse$species <- ifelse(mouse$species == "sp.", mouse$species2, mouse$species)
+
+ggplotly(ggplot(mouse, aes(x = sample, y = f_unique_weighted, fill = genus, label = species)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "Sample", y = "Proportion of Sample", 
+       title = "Proportion of sample matching known genomes") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+```
+
+```{r tax_dog, fig.width=10}
+canid <- filter(gather, Canid_diet_experiment == "y")
+canid$name <- gsub(",.*", "", canid$name)
+canid <- separate(canid, col = name, 
+                into = c("strain", "genus", "species", "species2"), 
+                sep = " ", extra = "warn")
+canid$species <- ifelse(canid$species == "sp.", canid$species2, canid$species)
+
+ggplotly(ggplot(canid, aes(x = sample, y = f_unique_weighted, fill = genus, label = species)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "Sample", y = "Proportion of Sample", 
+       title = "Proportion of sample matching known genomes") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+```
+
+## Assembly captures a good proportion of non-host reads
+
+Assembly captured an average of 82% of reads mapped back to each microbiome
+assembly. This is high for *de novo* assembly, and indicates that this method
+works fairly well with these samples. 
+
+
+```{r, fig.width = 14}
+flagstat <- read_tsv("outputs/map_to_megahit/multiqc_data/multiqc_samtools_flagstat.txt")
+flagstat <- tidyr::gather(data = flagstat, key = measure, value = reads, -Sample)
+flagstat <- flagstat %>% filter(measure %in% c("total_passed", "mapped_passed"))
+ggplot(flagstat, aes(x = Sample, y = reads, fill = measure)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set2", labels = c("Reads mapped", "Total reads"))
+```
+
+```{r format_megahit}
+megahit <- read.csv("outputs/megahit_logs/megahit_stats_all.txt", 
+                    stringsAsFactors = F, header = F)
+colnames(megahit) <- c("contigs", "basepairs", "min", "max", "avg", "N50")
+megahit[] <- lapply(megahit, function(x) gsub(" bp", "", x))
+megahit <- megahit %>%
+  separate(data = ., col = contigs, into = c("date", "time", "none", "contigs"),
+         sep = " ") %>% 
+  select(contigs, basepairs, max, avg, N50) %>%
+  mutate(basepairs = gsub("total ", "", basepairs)) %>%
+  mutate(max = gsub("max ", "", max)) %>%
+  mutate(avg = gsub("avg ", "", avg)) %>%
+  mutate(N50 = gsub("N50 ", "", N50))
+
+samples <- read.csv("outputs/megahit_logs/inputs.txt", 
+                    stringsAsFactors = F, header = F)
+samples$V2 <- gsub("outputs\\/bbduk\\/", "", samples$V2)
+samples$V2 <- gsub("_R2\\.nohost\\.fq\\.gz", "", samples$V2)
+samples <- samples$V2
+megahit <- cbind(megahit, samples)
+megahit$contigs <- as.numeric(megahit$contigs)
+megahit$basepairs <- as.numeric(megahit$basepairs)
+megahit$N50 <- as.numeric(megahit$N50)
+megahit$avg <- as.numeric(megahit$avg)
+megahit$max <- as.numeric(megahit$max)
+```
+
+Below I also report assembly statistics like average contig length, N50, and 
+max contig length.
+
+```{r, megahit1, fig.width = 12}
+ggplot(megahit, aes(x = samples, y = N50)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(yintercept = 1000) +
+  ggtitle("N50 contig length in assembly")
+
+ggplot(megahit, aes(x = samples, y = avg)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(yintercept = 1000) +
+  ggtitle("Average contig length in assembly")
+
+ggplot(megahit, aes(x = samples, y = max)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Maximum contig length in assembly")
+```
+
+## Impressions and next steps
+
+In general, these samples look fairly good however I am surprised at the 
+lack of clustering given the strong clusters seen with amplicon data.
+
+My next step is to generate bins for each sample (metagenome-assembled
+genomes). Using these bins, I will then perform taxonomic classification and 
+gene annotation. The samples with average contig lengths below 1000 will not
+perform as well in binning because 1000 basepairs are needed in a contig for 
+binning software to have enough signal to work correctly. 
+Because of this, the number of reads we can recall 
+after binning will decrease compared to the assembly percentage, but there are 
+some tricks we can do to recover those reads downstream if necessary (reference-
+based approaches and compact de Bruijn graph queries). Note that in some cases, 
+sequencing depth might improve assembly contiguity, but in many cases it will not
+because of strain variation and sequencing errors. 
+
+After I have completed these next steps, we can decide how to compare gene 
+content and abundance across samples. 
+

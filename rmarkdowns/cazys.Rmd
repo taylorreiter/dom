@@ -1,0 +1,104 @@
+---
+title: "CAZys"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = F)
+```
+
+```{r libs}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(tibble)
+library(vegan)
+library(kableExtra)
+```
+
+```{r colors}
+cols_spp2 <- c("lightblue", "blue4", "orangered3", "gold", "chocolate4", "chartreuse4",
+               "rosybrown3","olivedrab2", "darkorchid4", "plum4")
+#Alpaca, Cow, Dog, Guinea_pig, Human, Mouse, Pig, Rabbit, Rat, Sheep
+cols_diet <- c("#d7191c", "#018571", "#fdae61")
+# Carnivore, Herbivore, Omnivore
+cols_phys <- c("aquamarine2", "steelblue4", "violetred")
+# Hindgut Ruminant Simple
+```
+
+```{r read_data}
+info <- read_csv("inputs/tximport_samples/observational_samples.csv") %>%
+  select(sample, species, status, diet_type, physiology, dom_type)
+
+cazy <- read_tsv("outputs/functional_tables/cazy/cazy_raw_counts.tsv") %>%
+  as.data.frame() %>%
+  column_to_rownames("CAZy") %>%
+  t()
+```
+
+```{r pca}
+cazy <- cazy[ , colSums(cazy) > 0]
+pca <- prcomp(cazy,
+              center = TRUE,
+              scale. = TRUE)
+
+pca_imp <- summary(pca)
+
+pca_df <- pca$x %>%
+  as.data.frame() %>%
+  mutate(sample = rownames(cazy)) %>%
+  left_join(info, by = "sample")
+```
+
+```{r plot, fig.cap="Open circles are domesticated species."}
+plt <- ggplot(pca_df, aes(x = PC1, y = PC2, fill = diet_type, label = species, color = diet_type, shape = status)) + 
+  geom_point() +
+  scale_shape_manual(values = c(1, 21)) +
+  theme_minimal() +
+  geom_text_repel(size = 2, max.overlaps = 15) +
+  labs(x = paste0("PC1 (", round(pca_imp$importance[2, 1]*100, digits = 1), "%)"),
+       y = paste0("PC2 (", round(pca_imp$importance[2, 2]*100, digits = 1), "%)")) +
+  scale_color_manual(values = cols_diet) +
+  scale_fill_manual(values = cols_diet)
+
+plt
+```
+
+
+```{r}
+plt <- ggplot(pca_df, aes(x = PC1, y = PC2, fill = physiology, label = species, color = physiology, shape = status)) +
+  geom_point() +
+  scale_shape_manual(values = c(1, 21)) +
+  theme_minimal() +
+  geom_text_repel(size = 2, max.overlaps = 15) +
+  labs(x = paste0("PC1 (", round(pca_imp$importance[2, 1]*100, digits = 1), "%)"),
+       y = paste0("PC2 (", round(pca_imp$importance[2, 2]*100, digits = 1), "%)")) +
+  scale_color_manual(values = cols_phys) +
+  scale_fill_manual(values = cols_phys)
+
+plt
+```
+
+
+```{r permanova}
+veg_dist <- vegdist(cazy, "bray")
+info <- info[match(rownames(cazy), info$sample), ] # sort info by colnames
+info$species   <- as.factor(info$species)              # set factors for model
+info$diet_type <- as.factor(info$diet_type)
+info$physiology<- as.factor(info$physiology)
+info$dom_type  <- as.factor(info$dom_type)
+info$status    <- as.factor(info$status)
+
+perm <- adonis(veg_dist ~ diet_type + physiology + dom_type + status +species, 
+               data = info, 
+               permutations = 10000)
+
+write.table(perm$aov.tab, "outputs/permanova/cazy_permanova.tsv", quote = F)
+kable(perm$aov.tab, caption = "Permanova results.") %>% kable_styling()
+```
+
+```{r}
+summary(info) %>% kable(caption = "Summary of variables used for permanova.") %>% kable_styling()
+```

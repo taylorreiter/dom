@@ -1,0 +1,139 @@
+---
+title: "Mouse Diet Experiment EggNog Results"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = T)
+```
+
+```{r libraries}
+library(tximport)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(DESeq2)
+library(dplyr)
+library(vegan)
+library(kableExtra)
+```
+
+```{r tximport_og}
+txi_og <- read_tsv("outputs/tx2gene/eggnog_tx2gene_og.tsv")
+txi_og <- filter(txi_og, grepl("@", GENEID))
+mouse <- read_csv("inputs/tximport_samples/mouse_samples.csv")
+mouse_counts_og <- tximport(files = mouse$filepath, type = "salmon", tx2gene = txi_og)
+```
+
+```{r export_counts}
+mouse_counts_raw <- mouse_counts_og$counts
+colnames(mouse_counts_raw) <- mouse$SampleID
+mouse_counts_raw <- as.data.frame(mouse_counts_raw)
+mouse_counts_raw$ortholog <- rownames(mouse_counts_raw)
+write_tsv(mouse_counts_raw, "outputs/ortholog_counts/mouse_og_counts_raw.tsv")
+```
+
+```{r diff_abund_og}
+ddsTxi_og <- DESeqDataSetFromTximport(mouse_counts_og,
+                                      colData = mouse,
+                                      design = ~ species + diet)
+dds_og <- DESeq(ddsTxi_og)
+# resultsNames(dds_og) # lists the coefficients
+```
+
+```{r norm_counts}
+dds_og <- estimateSizeFactors(dds_og)
+dds_og_counts <- counts(dds_og, normalized=TRUE)
+colnames(dds_og_counts) <- colData(dds_og)$sample
+dds_og_counts <- as.data.frame(dds_og_counts)
+dds_og_counts$OG <- rownames(dds_og_counts)
+write_tsv(dds_og_counts, "outputs/ortholog_counts/mouse_og_counts_norm.tsv")
+```
+
+```{r pca_og}
+vsd <- vst(dds_og)
+pca_data <- plotPCA(vsd, intgroup = c("species", "actual_diet", "individual"), returnData=TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(PC1, PC2, shape=species, color=actual_diet)) + 
+  theme_minimal() +
+  geom_point(size=3) +
+  geom_text_repel(aes(label = individual)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA plot of NOG/COG orthologs in mouse diet study")
+```
+
+```{r permanova}
+vsd_assay <- t(assay(vsd))
+rownames(vsd_assay) <- colData(vsd)$SampleID
+veg_dist <- vegdist(vsd_assay, "bray")
+
+mouse <- mouse[match(rownames(vsd_assay), mouse$SampleID), ] # sort info by colnames
+mouse$species <- as.factor(mouse$species)              # set factors for model
+mouse$actual_diet <- as.factor(mouse$actual_diet)
+mouse$species <- as.factor(mouse$species)
+
+perm <- adonis(veg_dist ~ species + actual_diet, 
+               data = mouse, 
+               permutations = 10000)
+write.table(perm$aov.tab, "outputs/permanova/mouse_og_permanova.tsv", quote = F)
+kable(perm$aov.tab) %>% kable_styling()
+```
+
+## Diet: Wild vs. Chow -- Differential abundance
+
+```{r og_diet_res}
+res <- results(dds_og, name="diet_Wild_vs_Chow")
+res <- res[order(res$pvalue), ]
+
+res_sig <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog)) %>%
+  filter(padj < .05) 
+
+res_og <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog))
+```
+
+`r nrow(txi_og)` genes annotated to `r length(unique(txi_og$GENEID))` NOG/COG orthologs. `r nrow(res_sig)` were significantly 
+differentially abundant between wild and chow diet, controlling for species. 
+ `r table(res_sig$log2FoldChange > 0)[2]` were more 
+abundant in wild diet, while  `r table(res_sig$log2FoldChange > 0)[1]` were more abundant in the chow diet.
+
+## Species: Wildmouse vs. labmouse -- Differential abundance
+
+
+
+```{r og_species_res}
+res_species <- results(dds_og, name="species_wildmouse_vs_labmouse")
+res_species <- res_species[order(res_species$pvalue), ]
+
+res_species_sig <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog)) %>%
+  filter(padj < .05)
+
+res_species_og <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog))
+```
+
+`r nrow(res_species_sig)` genes were significantly differentially abundant between wildmouse and 
+labmouse, blocking for diet. `r table(res_species_sig$log2FoldChange > 0)[2]` were more abundant in wildmouse, while 
+`r table(res_species_sig$log2FoldChange > 0)[1]` were more abundant in labmouse.
+
+```{r write_tsvs}
+write_tsv(res_sig, "outputs/diff_abund/mouse/mouse_diet_og_sig.tsv")
+write_tsv(res_og, "outputs/diff_abund/mouse/mouse_diet_og_all.tsv")
+write_tsv(res_species_sig, "outputs/diff_abund/mouse/mouse_species_og_sig.tsv")
+write_tsv(res_species_og, "outputs/diff_abund/mouse/mouse_species_og_all.tsv")
+```

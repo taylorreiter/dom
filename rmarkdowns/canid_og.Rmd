@@ -1,0 +1,198 @@
+---
+title: "Canid Diet Experiment NOG/COG Results"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = T)
+```
+
+```{r libraries}
+library(tximport)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(DESeq2)
+library(dplyr)
+library(vegan)
+library(kableExtra)
+library(ggbeeswarm)
+```
+
+```{r tximport_og}
+txi_og <- read_tsv("outputs/tx2gene/eggnog_tx2gene_og.tsv")
+txi_og <- filter(txi_og, grepl("@", GENEID))
+canids <- read_csv("inputs/tximport_samples/canid_samples.csv")
+canid_counts_og <- tximport(files = canids$filepath, type = "salmon", tx2gene = txi_og)
+```
+
+```{r export_counts}
+canid_counts_raw <- canid_counts_og$counts
+colnames(canid_counts_raw) <- canids$sample
+canid_counts_raw <- as.data.frame(canid_counts_raw)
+canid_counts_raw$ortholog <- rownames(canid_counts_raw)
+write_tsv(canid_counts_raw, "outputs/ortholog_counts/canid_og_counts_raw.tsv")
+```
+
+```{r diff_abund_og}
+ddsTxi_og <- DESeqDataSetFromTximport(canid_counts_og,
+                                      colData = canids,
+                                      design = ~ species + diet)
+dds_og <- DESeq(ddsTxi_og)
+# resultsNames(dds_og) # lists the coefficients
+```
+
+```{r norm_counts}
+dds_og <- estimateSizeFactors(dds_og)
+dds_og_counts <- counts(dds_og, normalized=TRUE)
+colnames(dds_og_counts) <- colData(dds_og)$sample
+dds_og_counts <- as.data.frame(dds_og_counts)
+dds_og_counts$OG <- rownames(dds_og_counts)
+write_tsv(dds_og_counts, "outputs/ortholog_counts/canid_og_counts_norm.tsv")
+```
+
+```{r pca_og}
+vsd <- vst(dds_og)
+pca_data <- plotPCA(vsd, intgroup = c("species", "diet", "Individual"), returnData=TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(PC1, PC2, shape=species, color=diet)) + 
+  theme_minimal() +
+  geom_point(size=3) +
+  geom_text_repel(aes(label = Individual)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA plot of NOG/COG orthologs in canid diet study")
+```
+
+Permanova using `species + diet` as a model shows:
+```{r permanova}
+vsd_assay <- t(assay(vsd))
+rownames(vsd_assay) <- colData(vsd)$sample
+veg_dist <- vegdist(vsd_assay, "bray")
+
+canids <- canids[match(rownames(vsd_assay), canids$sample), ] # sort info by colnames
+canids$species <- as.factor(canids$species)              # set factors for model
+canids$diet <- as.factor(canids$diet)
+canids$day <- as.factor(canids$day )
+
+perm <- adonis(veg_dist ~ species + diet, 
+               data = canids, 
+               permutations = 10000)
+write.table(perm$aov.tab, "outputs/permanova/canid_og_permanova.tsv", quote = F)
+kable(perm$aov.tab) %>% kable_styling()
+```
+
+
+### Diet: Wild vs. Chow -- Differential abundance
+
+2,828,230 genes annotated to 185,870 NOG/COG orthologs. 3,014 were significantly 
+differentially abundant between wild and chow diet, controlling for species. 
+475 were more 
+abundant in wild diet, while 2539 were more abundant in the chow diet.
+
+```{r og_diet_res}
+res <- results(dds_og, name="diet_Wild_vs_Chow")
+res <- res[order(res$pvalue), ]
+
+res_sig <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog)) %>%
+  filter(padj < .05) %>%
+  mutate(id = seq(1:nrow(.)))
+
+res_og <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog))
+```
+
+### Species: Wolf vs. Dog -- Differential abundance
+
+2349 genes were significantly differentially abundant between wolf and dog, 
+blocking for diet. 1485 were more abundant in wolf, while 864 were more
+abundant in dogs.
+
+```{r og_species_res}
+res_species <- results(dds_og, name="species_Wolf_vs_Dog")
+res_species <- res_species[order(res_species$pvalue), ]
+
+res_species_sig <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog)) %>%
+  filter(padj < .05) %>%
+  mutate(id = seq(1:nrow(.)))
+
+res_species_og <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog))
+
+#table(res_species_sig$log2FoldChange < 0) 
+```
+
+```{r write_tsvs}
+write_tsv(res_sig, "outputs/diff_abund/canid/canid_diet_og_sig.tsv")
+write_tsv(res_og, "outputs/diff_abund/canid/canid_diet_og_all.tsv")
+write_tsv(res_species_sig, "outputs/diff_abund/canid/canid_species_og_sig.tsv")
+write_tsv(res_species_og, "outputs/diff_abund/canid/canid_species_og_all.tsv")
+```
+
+### Do the species change in reaction to their diets in different amounts?
+
+Instead of comparing across species or across diet, we can also ask what types of
+changes each species encountered when switching diets, and which changed the most.
+To do this, I defined a new variable, "interaction", which will allow me to 
+compare dog control vs. dog on switched diet, and wolf control vs. wolf on a 
+switched diet. This can't be built into the first model that we used above, 
+as that model would not be full rank. Dog has many more orthologs that are 
+significantly differentially abundanct,
+
+```{r differential_abundance2, include = F}
+ddsTxi2_og <- DESeqDataSetFromTximport(canid_counts_og,
+                                   colData = canids,
+                                   design = ~ interaction)
+dds2_og <- DESeq(ddsTxi2_og)
+```
+
+
+```{r}
+# resultsNames(dds2_og) # lists the coefficients
+
+dog <-  results(dds2_og, name="interaction_dog_switch_vs_dog_ctrl")
+dog_sig <- subset(dog, padj < .05)
+dog$animal <- "dog"
+dog_sig$animal <- "dog"
+wolf <- results(dds2_og, contrast=c("interaction", "wolf_switch", "wolf_ctrl"))
+wolf_sig <- subset(wolf, padj < .05)
+wolf_sig$animal <- "wolf"
+wolf$animal <- "wolf"
+dog_wolf <- rbind(dog, wolf)
+dog_wolf_sig <- rbind(dog_sig, wolf_sig)
+dog_wolf <- as.data.frame(dog_wolf)
+dog_wolf_sig <- as.data.frame(dog_wolf_sig)
+
+ggplot(data = dog_wolf, aes(x = animal, y = log2FoldChange, color = abs(padj))) +
+  geom_quasirandom(aes(color = ifelse(abs(padj) < .05, "significant", "non-significant")), alpha = .1) +
+  labs(y = "Species", x = "log2 Fold Change", 
+       title = "Distribution of log2 Fold Change for significant genes", 
+       subtitle = "Dog wild diet vs. dog chow diet, and wolf chow diet vs. wolf wild diet") +
+  theme_classic() +
+  theme(plot.title.position = "plot") +
+  scale_color_viridis_d() + 
+  guides(color=guide_legend(title="Significance"))
+```
+
+```{r}
+tally_dog_wolf_sig<- dog_wolf_sig %>%
+  mutate(direction = ifelse(log2FoldChange < 0, "down", "up")) %>%
+  group_by(animal, direction) %>%
+  tally()
+
+kable(tally_dog_wolf_sig) %>% kable_styling()
+```
