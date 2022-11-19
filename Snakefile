@@ -62,7 +62,7 @@ rule adapter_trim:
         r2 = 'outputs/trim/{sample}_R2.trim.fq.gz',
         o1 = 'outputs/trim/{sample}_o1.trim.fq.gz',
         o2 = 'outputs/trim/{sample}_o2.trim.fq.gz'
-    conda: 'trimmomatic.yml'
+    conda: 'envs/trimmomatic.yml'
     shell:'''
      trimmomatic PE {input.r1} {input.r2} \
              {output.r1} {output.o1} {output.r2} {output.o2} \
@@ -161,7 +161,7 @@ rule sourmash_compute:
         r1 = 'outputs/bbduk/{sample}_R1.nohost.fq.gz',
         r2 = 'outputs/bbduk/{sample}_R2.nohost.fq.gz'
     output: 'outputs/sigs/{sample}.sig'
-    conda: 'sourmash.yml'
+    conda: 'envs/sourmash.yml'
     shell:'''
     sourmash compute -k 21,31,51 --scaled 2000 --track-abundance \
             --merge {wildcards.sample} -o {output} \
@@ -171,7 +171,7 @@ rule sourmash_compute:
 rule sourmash_compare:
     input: expand('outputs/sigs/{sample}.sig', sample = SAMPLES)
     output: 'outputs/comp/comp_nohost.csv'
-    conda: 'sourmash.yml'
+    conda: 'envs/sourmash.yml'
     shell:'''
     sourmash compare -k 31 --csv {output} {input}
     '''
@@ -181,7 +181,7 @@ rule sourmash_gather:
         sig='outputs/sigs/{sample}.sig',
         genbank='../cosmo-kmers/inputs/databases/genbank-d2-k51.sbt.json'
     output: "outputs/gather/{sample}.csv"
-    conda: 'sourmash.yml'
+    conda: 'envs/sourmash.yml'
     shell:'''
     sourmash gather -o {output} --scaled 2000 -k 51 {input.sig} {input.genbank}
     '''
@@ -191,7 +191,7 @@ rule megahit:
         r1 = 'outputs/bbduk/{sample}_R1.nohost.fq.gz',
         r2 = 'outputs/bbduk/{sample}_R2.nohost.fq.gz'
     output: 'outputs/megahit/{sample}.contigs.fa'
-    conda: 'megahit.yml'
+    conda: 'envs/megahit.yml'
     params: output_folder = 'outputs/megahit/'
     shell:'''
     # megahit does not allow force overwrite, so each assembly needs to occur
@@ -208,7 +208,7 @@ rule megahit:
 rule index_megahit:
     input: 'outputs/megahit/{sample}.contigs.fa'
     output: 'outputs/megahit/{sample}.contigs.fa.bwt'
-    conda: 'bwa.yml'
+    conda: 'envs/bwa.yml'
     shell:'''
     bwa index {input}
     '''
@@ -220,7 +220,7 @@ rule map_to_megahit:
         r1 = 'outputs/bbduk/{sample}_R1.nohost.fq.gz',
         r2 = 'outputs/bbduk/{sample}_R2.nohost.fq.gz'
     output: 'outputs/map_to_megahit/{sample}.sam'
-    conda:'bwa.yml'
+    conda:'envs/bwa.yml'
     shell:'''
     bwa mem {input.assembly} {input.r1} {input.r2} > {output}
     '''
@@ -228,7 +228,7 @@ rule map_to_megahit:
 rule flagstat_megahit:
     input: 'outputs/map_to_megahit/{sample}.sam'
     output: 'outputs/map_to_megahit/{sample}.flagstat'
-    conda:'samtools.yml'
+    conda:'envs/samtools.yml'
     shell:'''
     samtools flagstat {input} > {output}
     '''
