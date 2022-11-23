@@ -23,16 +23,28 @@ library(dplyr)
 library(ggplot2)
 library(ggrepel)
 library(ggthemes)
+library(ggpubr)
+library(ggExtra)
 library(ggbeeswarm)
 library(UpSetR)
 library(vegan)
 library(kableExtra)
 ```
 
+```{r colors}
+cols_spp2 <- c("blue4", "orangered3", "gold", "chartreuse4",
+               "rosybrown3","olivedrab2", "darkorchid4", "plum4")
+# Cow, Dog, Guinea_pig, Mouse, Pig, Rabbit, Rat, Sheep
+cols_diet <- c("#d7191c", "#018571", "#fdae61") # Carnivore, Herbivore, Omnivore
+cols_phys <- c("aquamarine2", "steelblue4", "violetred") # Hindgut, Ruminant, Simple
+```
 
 ```{r tximport}
 txi_kegg <- read_tsv("outputs/tx2gene/eggnog_tx2gene_kegg.tsv")
 txi_kegg <- filter(txi_kegg, grepl("K", GENEID))
+# re-make txi_kegg; only keep first ortholog
+txi_kegg <- txi_kegg %>%
+  mutate(GENEID = gsub(",.*", "", GENEID))
 obs <- read_csv("inputs/tximport_samples/observational_samples.csv")
 obs_counts <- tximport(files = obs$filename, type = "salmon", tx2gene = txi_kegg)
 ```
@@ -42,7 +54,7 @@ obs_counts_raw <- obs_counts$counts
 colnames(obs_counts_raw) <- obs$sample
 obs_counts_raw <- as.data.frame(obs_counts_raw)
 obs_counts_raw$ortholog <- rownames(obs_counts_raw)
-write_tsv(obs_counts_raw, "outputs/ortholog_counts/obs_kegg_counts_raw.tsv")
+#write_tsv(obs_counts_raw, "outputs/ortholog_counts/obs_kegg_counts_raw.tsv")
 ```
 
 
@@ -60,22 +72,52 @@ dds_kegg_counts <- counts(dds_kegg, normalized=TRUE)
 colnames(dds_kegg_counts) <- colData(dds_kegg)$sample
 dds_kegg_counts <- as.data.frame(dds_kegg_counts)
 dds_kegg_counts$KO <- rownames(dds_kegg_counts)
-write_tsv(dds_kegg_counts, "outputs/ortholog_counts/obs_kegg_counts_norm.tsv")
+#write_tsv(dds_kegg_counts, "outputs/ortholog_counts/obs_kegg_counts_norm.tsv")
 ```
 
 ```{r pca_kegg}
 vsd <- vst(dds_status)
-pca_data <- plotPCA(vsd, intgroup = c("status", "species"), returnData=TRUE)
+pca_data <- plotPCA(vsd, intgroup = c("status", "species_color"), returnData=TRUE)
 percentVar <- round(100 * attr(pca_data, "percentVar"))
 
-ggplot(pca_data, aes(PC1, PC2, shape=status, color=species)) + 
-  theme_minimal() +
+pca <- ggplot(pca_data, aes(PC1, PC2, shape=status, color=species_color)) + 
+  theme_bw() +
   geom_point(size=3) +
-  geom_text_repel(aes(label = species)) +
+  #geom_text_repel(aes(label = species)) +
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
   ylab(paste0("PC2: ",percentVar[2],"% variance")) +
   ggtitle("PCA plot of KEGG orthologs in observational study") +
-  scale_color_tableau(palette = "Tableau 20")
+  scale_shape_manual(values = c(21, 19), name = "status") +
+  scale_color_manual(values = c(cow = "blue4", dog = "orangered3", guineapig = "gold",
+                                mouse = "chartreuse4", pig = "rosybrown3",
+                                rabbit = "olivedrab2", rat = "darkorchid4", sheep = "plum4"),
+                     name = "species")
+
+pca_by_shape_for_marginal <- ggplot(pca_data, aes(PC1, PC2, color=status)) +
+  theme_bw() +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA plot of KEGG orthologs in observational study") +
+  scale_color_manual(values = c("grey89", "grey11"))
+  #scale_shape_manual(values = c(21, 19), name = "status") 
+
+# remove the legend, as ggmarginal plots outside of legend
+pca_final <- pca_by_shape_for_marginal + theme(legend.position = "none")
+# add histograms to edges of plt
+pca_final <- ggExtra::ggMarginal(pca_final, type = "density", aes(color = status), 
+                                 groupColour = T, groupFill = T)
+# generate the legend from the original plot as an object
+legend <- pca + 
+  theme(legend.text=element_text(size=12),
+        legend.title=element_text(size=13))
+legend <- as_ggplot(get_legend(legend))
+
+# join legend with plot
+pca_final <- ggarrange(as_ggplot(pca_final), legend,
+                       ncol = 2, heights = 3, widths = c(2, 1))
+pca_final
+pca
 ```
 
 ```{r permanova}
@@ -94,7 +136,7 @@ perm <- adonis(veg_dist ~ dom_type + diet_type + physiology + status + species,
                data = obs, 
                permutations = 10000)
 
-write.table(perm$aov.tab, "outputs/permanova/observational_kegg_permanova.tsv", quote = F)
+#write.table(perm$aov.tab, "outputs/permanova/observational_kegg_permanova.tsv", quote = F)
 
 kable(perm$aov.tab) %>% kable_styling()
 ```
@@ -103,16 +145,24 @@ kable(perm$aov.tab) %>% kable_styling()
 
 ```{r status_functions}
 plot_status_sig <- function(KO, dds = dds_status, sig_df){
-  KO_df <- plotCounts(dds, gene = KO, 
-                      intgroup = c("status", "physiology", "diet_type"), 
+  # KO <- "ko:K00423"
+  # dds = dds_status
+  # sig_df = res_sig
+  KO_df <- plotCounts(dds, gene = KO,
+                      intgroup = c("status", "physiology", "diet_type", "species_color"), 
                       normalized = TRUE, transform = TRUE, returnData=TRUE)
   
-  ggplot(KO_df, aes(x = status, y = count, color = physiology, shape = diet_type)) + 
+  ggplot(KO_df, aes(x = status, y = count, color = species_color, shape = status)) + 
     geom_point(position=position_jitter(w = 0.1,h = 0)) +
     theme_bw() +
     ggtitle(KO) +
     theme(plot.title = element_text(hjust = 0.5)) +
     scale_y_log10() +
+    scale_shape_manual(values = c(21, 19), name = "status") +
+    scale_color_manual(values = c(cow = "blue4", dog = "orangered3", guineapig = "gold",
+                                  mouse = "chartreuse4", pig = "rosybrown3",
+                                  rabbit = "olivedrab2", rat = "darkorchid4", sheep = "plum4"),
+                       name = "species") +
     labs(caption = paste0("log2 Fold Change = ", 
                           round(sig_df[sig_df$ortholog == KO, "log2FoldChange"],
                                 digits = 3),
@@ -142,39 +192,35 @@ res_sig <- res %>%
 res_kegg <- res %>%
   as.data.frame %>%
   mutate(ortholog = rownames(.)) %>%
-  filter(grepl("K", ortholog))             # keep only kegg orthologs
+  filter(grepl("K", ortholog))            # keep only kegg orthologs
+
 ```
 
-When comparing wild vs. domesticated animals, there were `r nrow(res_sig)` 
-differentially abundant KEGG 
-orthologs of `r nrow(res_kegg)` annotated orthologs. Of these, 
-`r table(res_sig$log2FoldChange < 0)[1]` were more abundant in wild
-than domestic, while `r table(res_sig$log2FoldChange < 0)[2]` were less abundant 
-in wild than domestic. 
+When comparing wild vs. domesticated animals, there were `r nrow(res_sig)` differentially abundant KEGG 
+orthologs of `r nrow(res_kegg)` annotated orthologs. 
+Of these, `r table(res_sig$log2FoldChange < 0)[1]` were more abundant in wild than domestic, while `r table(res_sig$log2FoldChange < 0)[2]` were less abundant in wild than domestic. 
 
 However, these numbers only include orthologs with a p value less than .05. 
-It is probably necessary to futher filter on log fold change or base mean of 
+It is probably necessary to further filter on log fold change or base mean of 
 counts. For example, K06609,K08139,K08368 is significantly differentially abundant 
-(p = `r round(res_kegg[res_kegg$ortholog == "ko:K06609,ko:K08139,ko:K08368", "padj"], digits = 3)`), 
+(p = `r round(res_kegg[res_kegg$ortholog == "ko:K06609", "padj"], digits = 3)`), 
 but the log fold change is 
-`r round(res_kegg[res_kegg$ortholog == "ko:K06609,ko:K08139,ko:K08368", "log2FoldChange"], digits = 3)`. It looks like this:
+`r round(res_kegg[res_kegg$ortholog == "ko:K06609", "log2FoldChange"], digits = 3)`. It looks like this:
 
 ```{r plot_ortho_k02438}
-plot_status_sig(KO = "ko:K06609,ko:K08139,ko:K08368", dds = dds_status, sig_df = res_kegg)
+plot_status_sig(KO = "ko:K06609", dds = dds_status, sig_df = res_kegg)
 ```
 
 
 ```{r res_sig_filt}
 res_sig <- res_sig %>%
-  filter(abs(log2FoldChange) > 3)
+  filter(abs(log2FoldChange) > 2)
 ```  
 
-This difference is not biologically meaningful. It may make sense to filter at to
-an absolute log2 fold change greater than 3. At this level, there were 
-`r nrow(res_sig)` differentially abundant KEGG orthologs of `r nrow(res_kegg)`
-annotated orthologs. `r table(res_sig$log2FoldChange < 0)[1]` were more abundant 
-in wild than domestic, while `r table(res_sig$log2FoldChange < 0)[2]` were less
-abundantin wild than domestic. 
+This difference is not biologically meaningful. 
+It may make sense to filter at to an absolute log2 fold change greater than 3. 
+At this level, there were `r nrow(res_sig)` differentially abundant KEGG orthologs of `r nrow(res_kegg)` annotated orthologs. 
+`r table(res_sig$log2FoldChange < 0)[1]` were more abundant in wild than domestic, while `r table(res_sig$log2FoldChange < 0)[2]` were less abundant in wild than domestic. 
 
 At this filtration level we see examples like K20370, which encodes a
 phosphoenolpyruvate carboxykinase. This ortholog increased in abundance for 
@@ -186,8 +232,8 @@ plot_status_sig(KO = "ko:K20370", dds = dds_status, sig_df = res_sig)
 
 More examples of a differentially abundant KEGG orthologs are below. 
 
-K01179,K01181,K01201,K07407 encodes a metabolic enzyme. In this experiment, it has a 
-the largest absolute log2 Fold Change of the significantly differentially 
+ko:K00423 encodes a metabolic enzyme. 
+In this experiment, it has a the largest absolute log2 Fold Change of the significantly differentially 
 abundant KEGG orthologs (log2FC = `r min(res_sig$log2FoldChange)`, p < .001). 
 We see that this means that this ortholog is less abundant in the wild species 
 than the domestic species. 
@@ -197,16 +243,7 @@ ortholog in 8 domestic samples present omnivoes and herbivores with hindgut
 physiology
 
 ```{r contrast_levels}
-plot_status_sig(KO = "ko:K01179,ko:K01181,ko:K01201,ko:K07407", dds = dds_status, sig_df = res_sig)
-```
-
-Another example is K10953, RTX toxin RtxA associated with infection disease.
-Again, we see that although this is more abundant in more domestic animals 
-than in wild animals, this difference is driven by low abundance in some
-wild sample. 
-
-```{r contrast_level2}
-plot_status_sig(KO = "ko:K10953", dds = dds_status, sig_df = res_sig)
+plot_status_sig(KO = "ko:K00423", dds = dds_status, sig_df = res_sig)
 ```
 
 ### Enrichment 
@@ -258,10 +295,10 @@ clusterProfiler::dotplot(enriched_rep, font.size = 7, showCategory = nrow(enrich
 
 ```{r write_files}
 ## Diet contrast
-write_tsv(res_sig, "outputs/diff_abund/obs_kegg_ortholog_sig.tsv")
-write_tsv(res_kegg, "outputs/diff_abund/obs_kegg_ortholog_all.tsv")
-write_tsv(enriched_ind@result, "outputs/diff_abund/obs_kegg_enrich_up.tsv")
-write_tsv(enriched_rep@result, "outputs/diff_abund/obs_kegg_enrich_down.tsv")
+#write_tsv(res_sig, "outputs/diff_abund/obs_kegg_ortholog_sig.tsv")
+#write_tsv(res_kegg, "outputs/diff_abund/obs_kegg_ortholog_all.tsv")
+#write_tsv(enriched_ind@result, "outputs/diff_abund/obs_kegg_enrich_up.tsv")
+#write_tsv(enriched_rep@result, "outputs/diff_abund/obs_kegg_enrich_down.tsv")
 ```
 
 ```{r contrast_level_test, include = F, echo = F, eval = F}
@@ -682,7 +719,7 @@ upset(fromList(list_more_abund_in_wild), order.by = "degree",
       nsets = 8, nintersects = 200)
 ```
 
-Comparitively, we see more overlap in orthologs that are more abundant in 
+Comparatively, we see more overlap in orthologs that are more abundant in 
 domesticated animals. Although these numbers are smaller, there are fewer
 orthologs that were more abundant in the domesticated animals than in the wild
 animals. We also see that the number of sets that overlap increases, with as
@@ -745,7 +782,7 @@ ko_sums <- obs_counts %>%
 # filter and prune obs metadata to the columns we still need, and join with read 
 # to be used as denominator for corncob
 obs <- obs %>%
-  select(sample, species, dom_status = status, diet_type, physiology, dom_type) %>%
+  select(sample, species, dom_status = status, diet_type, physiology, dom_type, species_color) %>%
   left_join(ko_sums, by = "sample")
 ```
 
@@ -778,10 +815,12 @@ fit_corncob <- function(col_num) {
   # run corncob with LRT
   try({
     corncob_out <- df %>%
-      select(species, dom_status, diet_type, physiology, dom_type, num_reads, all_of(col_num)) %>%
-      dplyr::rename(ww = 7) %>%
-      corncob::bbdml(formula = cbind(ww, num_reads - ww) ~ dom_status + diet_type + physiology, 
-                     formula_null = cbind(ww, num_reads - ww) ~ diet_type + physiology,
+      select(species, dom_status, diet_type, physiology, dom_type, species_color, num_reads, all_of(col_num)) %>%
+      dplyr::rename(ww = 8) %>%
+      corncob::bbdml(#formula = cbind(ww, num_reads - ww) ~ dom_status + diet_type + physiology, 
+                     #formula_null = cbind(ww, num_reads - ww) ~ diet_type + physiology,
+                     formula = cbind(ww, num_reads - ww) ~ dom_status + species_color, 
+                     formula_null = cbind(ww, num_reads - ww) ~ species_color,
                      phi.formula = ~ 1,
                      phi.formula_null = ~ 1,
                      data = .,
@@ -799,17 +838,17 @@ fit_corncob <- function(col_num) {
 }
 
 # run function on all AAs
-all_ccs <- sapply(8:ncol(df), fit_corncob, simplify=F)
+all_ccs <- sapply(9:ncol(df), fit_corncob, simplify=F)
 all_ccs <- do.call(rbind, all_ccs)
 
 # perfom pvalue adustment
-sig2 <- all_ccs %>%
+sig3 <- all_ccs %>%
   filter(mu %in% c("mu.dom_statuswild")) %>%
   group_by(mu) %>%
   mutate(fdr = p.adjust(p_value, method = "fdr")) %>%
   filter(fdr < .05) %>%
   left_join(pathway_names, by = c("pathway" = "path"))
-View(sig2)
+View(sig3)
 ```
 
 
@@ -818,46 +857,91 @@ It does ok, but seems less specific (e.g. "carbon metabolism" instead of "starch
 The first method recovers 26 significant pathways, the second 51. 
 They overlap by 10 pathways.
 ```{r read_kegg_counts_to_pathways, eval = F}
-# create a tximport file for pathway info using the eggnog file
-eggnog <- read_tsv("outputs/atlas_out/Genecatalog/annotations/eggNog.tsv.gz")
-txi_kegg_pathway <- eggnog %>%
-  select(TXNAME = Query, GENEID=KEGG_Pathway) %>%
-  filter(!is.na(GENEID)) %>%
-  mutate(GENEID = basename(gsub(",", "\\/", GENEID))) # select the last pathway :( 
+# # create a tximport file for pathway info using the eggnog file
+# eggnog <- read_tsv("outputs/atlas_out/Genecatalog/annotations/eggNog.tsv.gz")
+# txi_kegg_pathway <- eggnog %>%
+#   select(TXNAME = Query, GENEID=KEGG_Pathway) %>%
+#   filter(!is.na(GENEID)) %>%
+#   mutate(GENEID = basename(gsub(",", "\\/", GENEID))) # select the last pathway :( 
+# 
+# obs <- read_csv("inputs/tximport_samples/observational_samples.csv")
+# obs_pathways <- tximport(files = obs$filename, type = "salmon", tx2gene = txi_kegg_pathway)
+# 
+# # grab pathway abundances
+# obs_pathways <- obs_pathways$counts
+# colnames(obs_pathways) <- obs$sample
+# obs_pathways <- as.data.frame(obs_pathways) %>%
+#   mutate(across(where(is.numeric), ceiling))
+# 
+# # transpose counts
+# obs_pathways_t <- obs_pathways %>% 
+#   t() %>% 
+#   as.data.frame() %>%
+#   rownames_to_column("sample")
+# 
+# obs <- obs %>%
+#   select(sample, species, dom_status = status, diet_type, physiology, dom_type) %>%
+#   left_join(ko_sums, by = "sample")
+# 
+# # join with metadata
+# df <- left_join(obs, obs_pathways_t, by = "sample")
+# 
+# # run function on all AAs
+# all_ccs <- sapply(8:ncol(df), fit_corncob, simplify=F)
+# all_ccs <- do.call(rbind, all_ccs)
+# View(all_ccs)
+# 
+# # perfom pvalue adustment
+# sig <- all_ccs %>%
+#   filter(mu %in% c("mu.dom_statuswild")) %>%
+#   group_by(mu) %>%
+#   mutate(fdr = p.adjust(p_value, method = "fdr")) %>%
+#   filter(fdr < .05) %>%
+#   left_join(pathway_names, by = c("pathway" = "path"))
 
-obs <- read_csv("inputs/tximport_samples/observational_samples.csv")
-obs_pathways <- tximport(files = obs$filename, type = "salmon", tx2gene = txi_kegg_pathway)
+```
 
-# grab pathway abundances
-obs_pathways <- obs_pathways$counts
-colnames(obs_pathways) <- obs$sample
-obs_pathways <- as.data.frame(obs_pathways) %>%
-  mutate(across(where(is.numeric), ceiling))
 
-# transpose counts
-obs_pathways_t <- obs_pathways %>% 
-  t() %>% 
-  as.data.frame() %>%
-  rownames_to_column("sample")
+```{r, eval = F}
+nrow(eggnog) # 4,891,645
+colnames(eggnog)
+length(unique(eggnog$GO_terms)) # 10,605
+table(is.na(eggnog$GO_terms)) # NA 3,865,699
 
-obs <- obs %>%
-  select(sample, species, dom_status = status, diet_type, physiology, dom_type) %>%
-  left_join(ko_sums, by = "sample")
+length(unique(eggnog$Target)) # 1,318,987
+table(is.na(eggnog$Target)) # NA 0
 
-# join with metadata
-df <- left_join(obs, obs_pathways_t, by = "sample")
+length(unique(eggnog$Protein_name)) # 19459
+table(is.na(eggnog$Protein_name))   # 2,338,192
 
-# run function on all AAs
-all_ccs <- sapply(8:ncol(df), fit_corncob, simplify=F)
-all_ccs <- do.call(rbind, all_ccs)
-View(all_ccs)
+length(unique(eggnog$EggNog)) # 506,900
+table(is.na(eggnog$EggNog))   # 0
 
-# perfom pvalue adustment
-sig <- all_ccs %>%
-  filter(mu %in% c("mu.dom_statuswild")) %>%
-  group_by(mu) %>%
-  mutate(fdr = p.adjust(p_value, method = "fdr")) %>%
-  filter(fdr < .05) %>%
-  left_join(pathway_names, by = c("pathway" = "path"))
+length(unique(eggnog$EC)) # 6574
+table(is.na(eggnog$EC))   # 3,183,083
 
+length(unique(eggnog$KO)) # 21771
+table(is.na(eggnog$KO))   # 1,773,518 
+
+length(unique(eggnog$KEGG_Module)) # 2561
+table(is.na(eggnog$KEGG_Module))   # 3,682,195 
+
+length(unique(eggnog$KEGG_Pathway)) # 4034
+table(is.na(eggnog$KEGG_Pathway))   # 3,023,746 
+
+length(unique(eggnog$KEGG_rclass)) # 2855
+table(is.na(eggnog$KEGG_rclass))   # 3,657,762
+
+length(unique(eggnog$BRITE)) # 1946
+table(is.na(eggnog$BRITE))   # 1,773,535 
+tmp <- eggnog %>%
+  select(Protein_name, FunctionalCategory)
+
+tmp <- eggnog %>% select(Protein_name, KO) %>% group_by(Protein_name, KO) %>% tally()
+
+length(unique(eggnog$BiGG_Reaction)) # 3379
+table(is.na(eggnog$BiGG_Reaction))   # 4,563,262
+
+length(unique(eggnog$FunctionalCategory)) # 313
+table(is.na(eggnog$FunctionalCategory))   # 296,847 
 ```

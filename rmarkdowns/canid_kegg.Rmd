@@ -7,7 +7,7 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_knit$set(root.dir = '../')
-knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = T)
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = F)
 ```
 
 
@@ -26,9 +26,13 @@ library(ggbeeswarm)
 library(kableExtra)
 ```
 
++ Note -- selecting just the first kegg ortholog reduces the number of distinct orthologs in txi_kegg from 21,770 to 8923
 ```{r tximport}
 txi_kegg <- read_tsv("outputs/tx2gene/eggnog_tx2gene_kegg.tsv")
 txi_kegg <- filter(txi_kegg, grepl("K", GENEID))
+# re-make txi_kegg; only keep first ortholog
+txi_kegg <- txi_kegg %>%
+  mutate(GENEID = gsub(",.*", "", GENEID))
 canids <- read_csv("inputs/tximport_samples/canid_samples.csv")
 canid_counts <- tximport(files = canids$filepath, type = "salmon", tx2gene = txi_kegg)
 ```
@@ -38,27 +42,27 @@ canid_counts_raw <- canid_counts$counts
 colnames(canid_counts_raw) <- canids$sample
 canid_counts_raw <- as.data.frame(canid_counts_raw)
 canid_counts_raw$ortholog <- rownames(canid_counts_raw)
-write_tsv(canid_counts_raw, "outputs/ortholog_counts/canid_kegg_counts_raw.tsv")
+#write_tsv(canid_counts_raw, "outputs/ortholog_counts/canid_kegg_counts_raw.tsv")
 ```
 
-```{r differential_abundance3, include = F}
-ddsTxi3 <- DESeqDataSetFromTximport(canid_counts,
-                                    colData = canids,
-                                    design = ~species + species:individual_n + species:diet)
-dds3 <- DESeq(ddsTxi3)
+```{r differential_abundance, include = F}
+ddsTxi <- DESeqDataSetFromTximport(canid_counts,
+                                   colData = canids,
+                                   design = ~species + species:individual_n + species:diet)
+dds <- DESeq(ddsTxi)
 ```
 
 ```{r norm_counts}
-dds_kegg <- estimateSizeFactors(dds3)
+dds_kegg <- estimateSizeFactors(dds)
 dds_kegg_counts <- counts(dds_kegg, normalized=TRUE)
 colnames(dds_kegg_counts) <- colData(dds_kegg)$sample
 dds_kegg_counts <- as.data.frame(dds_kegg_counts)
 dds_kegg_counts$KO <- rownames(dds_kegg_counts)
-write_tsv(dds_kegg_counts, "outputs/ortholog_counts/canid_kegg_counts_norm.tsv")
+#write_tsv(dds_kegg_counts, "outputs/ortholog_counts/canid_kegg_counts_norm.tsv")
 ```
 
 ```{r pca_kegg}
-vsd <- vst(dds3)
+vsd <- vst(dds)
 pca_data <- plotPCA(vsd, intgroup = c("species", "diet", "Individual"), returnData=TRUE)
 percentVar <- round(100 * attr(pca_data, "percentVar"))
 
@@ -84,7 +88,7 @@ canids$day <- as.factor(canids$day )
 perm <- adonis(veg_dist ~ species + diet, 
                data = canids, 
                permutations = 10000)
-write.table(perm$aov.tab, "outputs/permanova/canid_kegg_permanova.tsv", quote = F)
+#write.table(perm$aov.tab, "outputs/permanova/canid_kegg_permanova.tsv", quote = F)
 kable(perm$aov.tab) %>% kable_styling()
 ```
 
@@ -124,7 +128,7 @@ Model:
 ### Species
 
 ```{r}
-species2 <- results(dds3, name = "species_Wolf_vs_Dog", alpha = 0.05)
+species2 <- results(dds, name = "species_Wolf_vs_Dog", alpha = 0.05)
 species2_sig <- subset(species2, padj < 0.05)
 ```
 
@@ -178,7 +182,7 @@ species2_sig %>%
 
 ```{r}
 #resultsNames(dds3)
-diet2 <- results(dds3, contrast=list("speciesDog.dietWild", "speciesWolf.dietWild"),
+diet2 <- results(dds, contrast=list("speciesDog.dietWild", "speciesWolf.dietWild"),
                  alpha = 0.05)
 diet2_sig <- subset(diet2, padj < 0.05)
 ```
@@ -260,15 +264,16 @@ dog_wolf_sig <- rbind(dog_sig, wolf_sig)
 dog_wolf <- as.data.frame(dog_wolf)
 dog_wolf_sig <- as.data.frame(dog_wolf_sig)
 
-ggplot(data = dog_wolf, aes(x = animal, y = log2FoldChange, color = abs(padj))) +
-  geom_quasirandom(aes(color = ifelse(abs(padj) < .05, "significant", "non-significant")), alpha = .25) +
+ggplot(data = dog_wolf %>%
+         filter(baseMean != 0)%>%
+         filter(!is.na(padj)), aes(x = animal, y = log2FoldChange, color = abs(padj))) +
+  geom_quasirandom(aes(color = ifelse(abs(padj) < .05, "significant", "non-significant")), alpha = .5) +
   labs(y = "Species", x = "log2 Fold Change", 
        title = "Distribution of log2 Fold Change for significant genes", 
        subtitle = "Dog wild diet vs. dog chow diet, and wolf chow diet vs. wolf wild diet") +
   theme_classic() +
   theme(plot.title.position = "plot") +
-  scale_color_manual(values = c("grey", "black")) + 
-  ylim(c(-10, 10)) +
+  ylim(c(-20, 11)) +
   guides(color=guide_legend(title="Significance"))
 ```
 
@@ -335,193 +340,47 @@ clusterProfiler::dotplot(enriched_wolf_ind, font.size = 9,
   theme(plot.title.position = "plot")
 ```
 
+## Figure
 
-# Old analyses
+```{r}
+tmp <- dog_wolf_sig %>%
+  rownames_to_column("KO") %>%
+  mutate(KO = gsub("\\.1", "", KO),
+         KO = gsub("ko:", "", KO))
 
+wolf_ko <- tmp %>%
+  filter(animal == "wolf")
+dog_ko <- tmp%>%
+  filter(animal== "dog")
 
-```{r differential_abundance, include = F}
-ddsTxi <- DESeqDataSetFromTximport(canid_counts,
-                                   colData = canids,
-                                   design = ~ species + diet)
-dds <- DESeq(ddsTxi)
-# resultsNames(dds) # lists the coefficients
+table(wolf_ko$KO %in% dog_ko$KO)
+library(pheatmap)
 ```
 
 
-## Diet: Wild vs. Chow
+```{r}
+# I tried many combinations and none of them were significant
+# library(breakaway)
+
+# richness <- ceiling(canid_counts_raw[ , 1:16]) %>% breakaway
+# plot(richness)
+# combined_richness <- summary(richness) %>% as_tibble %>% left_join(canids, by = c("sample_names" = "sample"))
+# ggplot(tmp, aes(x = species, y = estimate, color = diet, label = Individual)) + 
+#   geom_point() +
+#   geom_label_repel()
+# 
+# # estimate differences in richness for sets of samples
+# 
+# # dogs control diet vs wolf control diet
+# tmp <- combined_richness %>%
+#   filter(species == "Wolf") 
+# 
+# bt_fixed <- betta(formula = estimate ~ diet, 
+#                       ses = error, data = tmp)
+# bt_fixed$table
 
 
-### Differential abundance
-
-```{r res_diet}
-res <- results(dds, name="diet_Wild_vs_Chow")
-res <- res[order(res$pvalue), ]
-
-res_sig <- res %>%
-  as.data.frame() %>%
-  mutate(ortholog = rownames(.)) %>%
-  filter(grepl("K", ortholog)) %>%                # keep only kegg orthologs
-  filter(padj < .05) %>%                          # p value less than .05
-  arrange(log2FoldChange)
-
-res_kegg <- res %>%
-  as.data.frame() %>%
-  mutate(ortholog = rownames(.)) %>%
-  filter(grepl("K", ortholog))             # keep only kegg orthologs
-```
-
-When comparing wild vs. chow diets, there were `r nrow(res_kegg)` differentially abundant KEGG orthologs of `r nrow(canid_counts$counts)` annotated orthologs. 
-Of these, `r res_sig %>% filter(log2FoldChange > 0) %>% nrow()` were more abundant in wild than chow, while `r res_sig %>% filter(log2FoldChange < 0) %>% nrow()` were less abundant in wild vs. chow. 
-
-An example of a differentially abundant KEGG ortholog is below. The ortholog 
-matches annotations ko:K05776,ko:K16785,ko:K16786,ko:K16787, and is
-involved with ATP-binding protein. In this experiment, 
-it has a the largest absolute log2 Fold Change of the significantly differentially 
-abundant KEGG orthologs (log2FC = -9.2, p < .001). We see that this means that 
-this ortholog is less abundant in the wild diet compared to the chow diet. 
-
-```{r contrast_levels}
-## contrast is: log2 fold change (MLE): diet Wild vs Chow 
-## this means that for these results, "repressed" means the value is 
-## lower with the "wild" diet.
-
-plotCounts(dds, gene = "ko:K05776,ko:K16785,ko:K16786,ko:K16787", intgroup = c("diet"), 
-           normalized = TRUE, transform = TRUE)
-```
-
-When we further separate ortholog abundance by species, we see that this contrast
-is largely driven by diet and not by species.
-
-```{r contrast_levels_species}
-plotCounts(dds, gene = "ko:K05776,ko:K16785,ko:K16786,ko:K16787", intgroup = c("diet", "species"), 
-           normalized = TRUE, transform = TRUE)
-```
-
-### Enrichment 
-
-Using KEGG ortholog pathway mappings, we can test for pathway enrichment in the differentially abundant orthologs. 
-Many of the orthologs that are less abundant when a wild diet is consumed (or more abundant when a chow diet is consumed) are involved in carbohydrate metabolism.
-
-```{r enrichment_all, eval = F}
-## download ortholog to pathway table
-pathways <- "http://rest.kegg.jp/link/pathway/ko"
-download.file(url = pathways, destfile = "inputs/kegg_pathways.tsv")
-pathways <- read_tsv("inputs/kegg_pathways.tsv", col_names = c("KO", "path"))
-pathways <- pathways %>%
-  mutate(KO = gsub("ko:", "", KO)) %>%
-  filter(grepl(pattern = "map", path)) %>%
-  #mutate(path = gsub("path:", "", path)) %>%
-  dplyr::select(path, KO)
-
-pathway_names <- "http://rest.kegg.jp/list/pathway"
-download.file(url = pathway_names, destfile = "inputs/kegg_pathway_names.tsv")
-pathway_names <- read_tsv("inputs/kegg_pathway_names.tsv", col_names = c("path", "name"))
-```
-
-```{r enrichment_diet}
-res_ind <- res_sig %>% 
-  filter(log2FoldChange > 0) %>%
-  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
-  mutate(ortholog = gsub("ko:", "", ortholog))
-
-enriched_ind <- enricher(gene = res_ind$ortholog, maxGSSize = 5000,
-                         TERM2GENE = pathways, TERM2NAME = pathway_names)
-clusterProfiler::dotplot(enriched_ind, font.size=9, showCategory = nrow(enriched_ind@result)) +
-  ggtitle("More abundant in wild diet")
-
-res_rep <- res_sig %>% 
-  filter(log2FoldChange < 0) %>%
-  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
-  mutate(ortholog = gsub("ko:", "", ortholog))
-
-enriched_rep <- enricher(gene = res_rep$ortholog, maxGSSize = 5000,
-                         TERM2GENE = pathways, TERM2NAME = pathway_names)
-clusterProfiler::dotplot(enriched_rep, font.size = 9, showCategory = nrow(enriched_rep@result)) +
-  ggtitle("Less abundant in wild diet")
-```
-
-## Species: Wolf vs. Dog
-
-We can also ask whether there are persistent differences in KEGG orthologabundance between wolfs and dogs independent of diet. 
-
-```{r res_species}
-res_species <- results(dds, name="species_Wolf_vs_Dog")
-res_species <- res_species[order(res_species$pvalue), ]
-
-res_species_sig <- res_species %>%
-  as.data.frame %>%
-  mutate(ortholog = rownames(.)) %>%
-  filter(grepl("K", ortholog)) %>%            # keep only kegg orthologs
-  filter(padj < .05)                          # p value less than .05
-
-res_species_kegg <- res_species %>%
-  as.data.frame %>%
-  mutate(ortholog = rownames(.)) %>%
-  filter(grepl("K", ortholog))              # keep only kegg orthologs
-
-## how many significant kegg orthologs at p = .05?
-## how many non-significant orthologs at p = .05?
-```
-
-When comparing wild vs. chow diets, there were `r nrow(res_species_sig)` differentially abundant KEGG orthologs of `r nrow(res_species_kegg)` annotated orthologs. 
-Of these, `r res_species_sig %>% filter(log2FoldChange > 0) %>% nrow()` were more abundant in wild than chow, while `r res_species_sig %>% filter(log2FoldChange < 0) %>% nrow()` were less abundant in wild vs. chow. 
-
-An example of a differentially abundant KEGG ortholog is below. K10175 is
-TBX1 (log2FoldChange = 11.54, p < .001).
-
-While this ortholog is abundant in wolf, it is not present or lowly abundant in dog.
-
-```{r contrast_levels_species2}
-plotCounts(dds, gene = "ko:K10175", intgroup = c("species"), 
-           normalized = TRUE, transform = TRUE)
-```
-
-When we further separate ortholog abundance by species, we see that this contrast is driven by species.
-
-```{r contrast_levels_species_diet}
-plotCounts(dds, gene = "ko:K10175", intgroup = c("diet", "species"), 
-           normalized = TRUE, transform = TRUE)
-```
-
-### Enrichment 
-
-Using KEGG ortholog pathway mappings, we can test for pathway enrichment 
-in the differentially abundant orthologs. While many pathways are  
-enriched in wolf, none are significantly more enriched in dog.
-
-```{r enrichment_species}
-res_species_ind <- res_species_sig %>% 
-  filter(log2FoldChange > 0) %>%
-  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
-  mutate(ortholog = gsub("ko:", "", ortholog))
-
-enriched_species_ind <- enricher(gene = res_species_ind$ortholog, maxGSSize = 5000,
-                         TERM2GENE = pathways, TERM2NAME = pathway_names)
-clusterProfiler::dotplot(enriched_species_ind, showCategory = nrow(enriched_species_ind@result),
-                         font.size = 9) +
-  ggtitle("More abundant in wolf")
-
-res_species_rep <- res_species_sig %>% 
-  filter(log2FoldChange < 0) %>%
-  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
-  mutate(ortholog = gsub("ko:", "", ortholog))
-
-enriched_species_rep <- enricher(gene = res_species_rep$ortholog, maxGSSize = 5000,
-                         TERM2GENE = pathways, TERM2NAME = pathway_names)
-# clusterProfiler::dotplot(enriched_species_rep) +
-#   ggtitle("Less abundant in wolf")
-```
-
-```{r write_files}
-## Diet contrast
-write_tsv(res_sig, "outputs/diff_abund/canid/canid_diet_kegg_ortholog_sig.tsv")
-write_tsv(res_kegg, "outputs/diff_abund/canid/canid_diet_kegg_ortholog_all.tsv")
-write_tsv(enriched_ind@result, "outputs/diff_abund/canid/canid_diet_kegg_enrich_up.tsv")
-write_tsv(enriched_rep@result, "outputs/diff_abund/canid/canid_diet_kegg_enrich_down.tsv")
-
-## Species contrast
-write_tsv(res_species_sig, "outputs/diff_abund/canid/canid_species_kegg_ortholog_sig.tsv")
-write_tsv(res_species_kegg, "outputs/diff_abund/canid/canid_species_kegg_ortholog_all.tsv")
-write_tsv(enriched_species_ind@result, "outputs/diff_abund/canid/canid_species_kegg_enrich_up.tsv")
-write_tsv(enriched_species_rep@result, "outputs/diff_abund/canid/canid_species_kegg_enrich_down.tsv")
+#tmp <- canids %>%
+#  select(species, diet, day, Individual)
+#dv <- DivNet::divnet(t(ceiling(canid_counts_raw[ , 1:16])), X = NULL)
 ```
