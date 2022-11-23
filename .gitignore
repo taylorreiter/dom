@@ -1,0 +1,11 @@
+.snakemake
+.Rhistory
+rmarkdowns/*html
+rmarkdowns/*cache
+rmarkdowns/*files
+.DS_Store
+outputs/
+inputs
+*swp
+outputs_first_round_seq/
+rmarkdowns/go_analyses/
