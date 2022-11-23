@@ -1,0 +1,472 @@
+---
+title: "Mouse Diet Experiment KEGG Ortholog Results"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = T)
+```
+
+```{r libs}
+library(tximport)
+library(readr)
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+library(clusterProfiler)
+library(ggrepel)
+library(ggthemes)
+library(ggbeeswarm)
+library(vegan)
+library(kableExtra)
+library(magrittr)
+
+```
+
+```{r tximport_prep}
+txi_kegg <- read_tsv("outputs/tx2gene/eggnog_tx2gene_kegg.tsv")
+txi_kegg <- filter(txi_kegg, grepl("K", GENEID))
+mouse <- read_csv("inputs/tximport_samples/mouse_samples.csv")
+```
+
+```{r tximport}
+mouse_counts <- tximport(files = mouse$filepath, type = "salmon", tx2gene = txi_kegg)
+```
+
+```{r export_counts}
+mouse_counts_raw <- mouse_counts$counts
+colnames(mouse_counts_raw) <- mouse$SampleID
+mouse_counts_raw <- as.data.frame(mouse_counts_raw)
+mouse_counts_raw$ortholog <- rownames(mouse_counts_raw)
+write_tsv(mouse_counts_raw, "outputs/ortholog_counts/mouse_kegg_counts_raw.tsv")
+```
+
+```{r differential_abundance2, include = F}
+ddsTxi3 <- DESeqDataSetFromTximport(mouse_counts,
+                                    colData = mouse,
+                                    design = ~species + species:individual_n + species:actual_diet)
+dds3 <- DESeq(ddsTxi3)
+```
+
+```{r norm_counts}
+dds_kegg <- estimateSizeFactors(dds3)
+dds_kegg_counts <- counts(dds_kegg, normalized=TRUE)
+colnames(dds_kegg_counts) <- colData(dds_kegg)$sample
+dds_kegg_counts <- as.data.frame(dds_kegg_counts)
+dds_kegg_counts$kegg <- rownames(dds_kegg_counts)
+write_tsv(dds_kegg_counts, "outputs/ortholog_counts/mouse_kegg_counts_norm.tsv")
+```
+
+
+```{r pca_kegg}
+vsd <- vst(dds3)
+pca_data <- plotPCA(vsd, intgroup = c("species", "actual_diet", "individual"), returnData=TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(PC1, PC2, shape=species, color=actual_diet)) + 
+  theme_minimal() +
+  geom_point(size=3) +
+  geom_text_repel(aes(label = individual)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  ggtitle("PCA plot of KEGG orthologs in mouse study") +
+  scale_color_brewer(palette = "Set1")
+```
+
+```{r permanova}
+vsd_assay <- t(assay(vsd))
+rownames(vsd_assay) <- colData(vsd)$SampleID
+veg_dist <- vegdist(vsd_assay, "bray")
+
+mouse <- mouse[match(rownames(vsd_assay), mouse$SampleID), ] # sort info by colnames
+mouse$species <- as.factor(mouse$species)              # set factors for model
+mouse$actual_diet <- as.factor(mouse$actual_diet)
+mouse$species <- as.factor(mouse$species)
+
+perm <- adonis(veg_dist ~ species + actual_diet, 
+               data = mouse, 
+               permutations = 10000)
+write.table(perm$aov.tab, "outputs/permanova/mouse_kegg_permanova.tsv", quote = F)
+kable(perm$aov.tab) %>% kable_styling()
+```
+
+```{r prepare_enrichment_pathways}
+## download ortholog to pathway table
+pathways <- "http://rest.kegg.jp/link/pathway/ko"
+if(!file.exists("inputs/kegg_pathways.tsv")){
+  download.file(url = pathways, destfile = "inputs/kegg_pathways.tsv")
+}
+pathways <- read_tsv("inputs/kegg_pathways.tsv", col_names = c("KO", "path"))
+pathways <- pathways %>%
+  mutate(KO = gsub("ko:", "", KO)) %>%
+  filter(grepl(pattern = "map", path)) %>%
+  #mutate(path = gsub("path:", "", path)) %>%
+  dplyr::select(path, KO)
+
+pathway_names <- "http://rest.kegg.jp/list/pathway"
+if(!file.exists("inputs/kegg_pathway_names.tsv")){
+  download.file(url = pathway_names, destfile = "inputs/kegg_pathway_names.tsv")
+}
+pathway_names <- read_tsv("inputs/kegg_pathway_names.tsv", col_names = c("path", "name"))
+```
+
+## Looking at species and diet, but controlling for individual
+
+DeSEQ2 allows users to test for group-specific condition effects when individuals nested within groups as occurs in the mouse experiments (reference: http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#group-specific-condition-effects-individuals-nested-within-groups).
+In other words, this allows us to control for changes in individual gut microbiomes between day 0 and day 28.
+This model setup allows us to test:
+1. if the groups (e.g. species) are different, controlling for individual and diet.
+2. if the "condition effect" (e.g. wild diet) is different for different groups (e.g. species). This particular approach compares the log2FC/result values from the contrast `specieslabmouse.actual_dietwild` and the contrast `specieswildmouse.actual_dietwild`. These original contrasts are built from comparing `specieslabmouse.actual_diet_wild` vs. `specieslabmouse.actual_diet_chow`. Therefore, because the chow diet is built in via the original contrast, we can only compare the differences between species for the wild diet.
+
+Model:
+```
+~species + species:individual_n + species:actual_diet
+```
+
+This model includes all of the mouse data.
+
+### Species
+
+```{r}
+species2 <- results(dds3, name = "species_wildmouse_vs_labmouse", alpha = 0.05)
+species2_sig <- subset(species2, padj < 0.05)
+```
+
+Controlling for individual and diet, `r nrow(species2_sig)` are differentially abundant.
+`r species2_sig %>% as.data.frame() %>% filter(log2FoldChange > 0) %>% nrow()` were more abundant in wildmouse, while `r species2_sig %>% as.data.frame() %>% filter(log2FoldChange < 0) %>% nrow()` were more abundant in labmouse.
+
+```{r}
+res_ind <- species2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_ind, showCategory = nrow(enriched_ind@result),
+                         font.size = 8) +
+  ggtitle("More abundant in wildmouse")+
+  theme(plot.title.position = "plot")
+
+res_rep <- species2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_rep <- enricher(gene = res_rep$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_rep, showCategory = nrow(enriched_rep@result),
+                         font.size = 8) +
+  ggtitle("More abundant in labmouse")+
+  theme(plot.title.position = "plot")
+```
+
+### Diet 
+
+```{r}
+#resultsNames(dds2)
+diet2 <- results(dds3, contrast=list("specieslabmouse.actual_dietwild", "specieswildmouse.actual_dietwild"),
+                 alpha = 0.05)
+diet2_sig <- subset(diet2, padj < 0.05)
+```
+
+Controlling for individual, `r nrow(diet2_sig)` orthologs are differentially abundant between labmouse and wildmouse for wild diet.
+`r diet2_sig %>% as.data.frame() %>% filter(log2FoldChange > 0) %>% nrow()` orthologs were more abundant in labmouse, while `r diet2_sig %>% as.data.frame() %>% filter(log2FoldChange < 0) %>% nrow()` orthologs were more abundant in wildmouse.
+
+```{r, fig.height = 10}
+res_ind <- diet2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_ind, showCategory = nrow(enriched_ind@result),
+                         font.size = 8) +
+  ggtitle("More abundant in labmouse on wild diet")+
+  theme(plot.title.position = "plot")
+
+res_rep <- diet2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_rep <- enricher(gene = res_rep$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_rep, showCategory = nrow(enriched_rep@result),
+                         font.size = 8) +
+  ggtitle("More abundant in wildmouse on wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+
+## Do the species change in reaction to their diets in different amounts?
+
+Instead of comparing across species or across diet, we can also ask what types of changes each species encountered when switching diets, and which species changed the most.
+To do this, I defined a new variable, "interaction", which will allow me to compare labmouse chow vs. labmouse on wild diet, and wildmouse wild vs. wildmouse on a chow diet.
+I used the terms `labmouse_chow`, `labmouse_switch`, `wildmouse_wild`, and `wildmouse_switch` for this interaction variable. 
+This can't be built into the first model that we used above as the model would not be full rank. 
+
+Model: 
+```
+design = ~ interaction
+```
+
+This model only includes animals that switched diets between day 0 and day 28.
+
+Labmouse and wildmouse have a similar decrease in KEGG orthologs when they consume a "switched" diet. 
+However, labmouse has many more KEGG orthologs that increase in abundance when they consume a wild diet, which does not occur when a wildmouse consumes a chow diet.
+This indicates that the functional potential of the labmouse gut microbiome changes more on a wild diet than does the wildmouse gut microbiome on a chow diet.
+
+```{r}
+mouse_switch <- read_csv("inputs/tximport_samples/mouse_samples_switch.csv")
+mouse_switch_counts <- tximport(files = mouse_switch$filepath, type = "salmon", tx2gene = txi_kegg)
+```
+
+```{r differential_abundance3, include = F}
+ddsTxi2 <- DESeqDataSetFromTximport(mouse_switch_counts,
+                                    colData = mouse_switch,
+                                    design = ~ interaction)
+dds2 <- DESeq(ddsTxi2)
+```
+
+```{r}
+# resultsNames(dds2) # lists the coefficients
+labmouse <-  results(dds2, name="interaction_labmouse_switch_vs_labmouse_chow")
+labmouse_sig <- subset(labmouse, padj < .05)
+labmouse$animal <- "labmouse"
+labmouse_sig$animal <- "labmouse"
+wildmouse <- results(dds2, contrast=c("interaction", "wildmouse_switch", "wildmouse_wild"))
+wildmouse_sig <- subset(wildmouse, padj < .05)
+wildmouse_sig$animal <- "wildmouse"
+wildmouse$animal <- "wildmouse"
+labmouse_wildmouse <- rbind(labmouse, wildmouse)
+labmouse_wildmouse_sig <- rbind(labmouse_sig, wildmouse_sig)
+labmouse_wildmouse <- as.data.frame(labmouse_wildmouse)
+labmouse_wildmouse_sig <- as.data.frame(labmouse_wildmouse_sig)
+
+ggplot(data = labmouse_wildmouse, aes(x = animal, y = log2FoldChange, color = abs(padj))) +
+  geom_quasirandom(aes(color = ifelse(abs(padj) < .05, "significant", "non-significant")), alpha = .25) +
+  labs(y = "Species", x = "log2 Fold Change", 
+       title = "Distribution of log2 Fold Change for significant genes", 
+       subtitle = "labmouse wild diet vs. labmouse chow diet, and wildmouse chow diet vs. wildmouse wild diet") +
+  theme_classic() +
+  theme(plot.title.position = "plot") +
+  scale_color_manual(values = c("grey", "black")) + 
+  ylim(c(-10, 10)) +
+  guides(color=guide_legend(title="Significance"))
+```
+
+```{r}
+tally_labmouse_wildmouse_sig <- labmouse_wildmouse_sig %>%
+  mutate(direction = ifelse(log2FoldChange < 0, "down", "up")) %>%
+  group_by(animal, direction) %>%
+  tally()
+
+kable(tally_labmouse_wildmouse_sig) %>% kable_styling()
+```
+
+Of the orthologs that decrease in abundance for the labmouse, the following pathways are enriched:
+```{r}
+tmp <- labmouse_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_labmouse_rep <- enricher(gene = tmp$ortholog, TERM2GENE = pathways, 
+                                  TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_labmouse_rep, showCategory = nrow(enriched_labmouse_rep@result), font.size=8) +
+  ggtitle("Decreased abundance when a labmouse consumes a wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+Of the orthologs that increase in abundance for the labmouse, three pathways are significantly enriched.
+```{r}
+tmp <- labmouse_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_labmouse_ind <- enricher(gene = tmp$ortholog, TERM2GENE = pathways, 
+                                  TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_labmouse_ind, showCategory = nrow(enriched_labmouse_ind@result), font.size=8) +
+  ggtitle("Increased abundance when a labmouse consumes a wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+Of the orthologs that decrease in abundance for the wildmouse, the following pathways are enriched:
+```{r}
+tmp <- wildmouse_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_wildmouse_rep <- enricher(gene = tmp$ortholog, TERM2GENE = pathways, 
+                                  TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_wildmouse_rep, showCategory = nrow(enriched_wildmouse_rep@result), font.size = 8) +
+  ggtitle("Decreased abundance when a wildmouse consumes a chow diet") +
+  theme(plot.title.position = "plot")
+```
+
+Of the orthologs that increase in abundance for the wildmouse, the following pathways are enriched:
+
+```{r}
+tmp <- wildmouse_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_wildmouse_ind <- enricher(gene = tmp$ortholog, TERM2GENE = pathways, 
+                                  TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_wildmouse_ind, showCategory = nrow(enriched_wildmouse_ind@result), font.size = 8) +
+  ggtitle("Decreased abundance when a wildmouse consumes a chow diet") +
+  theme(plot.title.position = "plot")
+```
+
+
+# Old Analyses
+
+```{r differential_abundance, include = F}
+mouse_counts <- tximport(files = mouse$filepath, type = "salmon", tx2gene = txi_kegg)
+mouse <- read_csv("inputs/tximport_samples/mouse_samples.csv")
+
+ddsTxi <- DESeqDataSetFromTximport(mouse_counts,
+                                   colData = mouse,
+                                   design = ~ species + actual_diet)
+
+dds <- DESeq(ddsTxi)
+```
+
+## Diet: Wild vs. Chow -- Differential abundance
+
+```{r diet_res}
+res <- results(dds, name="actual_diet_wild_vs_chow")
+res <- res[order(res$pvalue), ]
+
+res_sig <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("ko", ortholog)) %>%
+  filter(padj < .05) %>%
+  mutate(id = seq(1:nrow(.)))
+
+res_kegg <- res %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("@", ortholog))
+
+```
+
+`r nrow(txi_kegg)` genes annotated to `r length(unique(txi_kegg$GENEID))` KEGG orthologs. `r nrow(res_sig)` were significantly 
+differentially abundant between wild and chow diet, controlling for species. 
+`r table(res_sig$log2FoldChange > 0)[2]` were more 
+abundant in wild diet, while `r table(res_sig$log2FoldChange > 0)[1]` were more abundant in the chow diet.
+
+The most significantly induced ortholog for wild diet is depicted below. 
+We see that this pattern is driven by the expression of this ortholog 
+in the labmouse when eating a wild diet, but that this ortholog is not
+detected in wildmouse for either diet type.
+
+```{r}
+plotCounts(dds, gene = "ko:K02025,ko:K02026,ko:K05802,ko:K06994,ko:K15771,ko:K22051",
+           intgroup = c("actual_diet", "species"))
+
+```
+
+We can also examine which ortholog pathways are enriched in the differentially
+abundant orthologs.
+
+```{r enrichment_actual_diet}
+res_ind <- res_sig %>% 
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, maxGSSize = 5000,
+                         TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_ind) +
+  ggtitle("More abundant in wild diet")
+
+res_rep <- res_sig %>% 
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+# enriched_rep <- enricher(gene = res_rep$ortholog, maxGSSize = 5000,
+#                          TERM2GENE = pathways, TERM2NAME = pathway_names)
+# clusterProfiler::dotplot(enriched_rep) +
+#   ggtitle("More abundant in chow diet")
+```
+
+## Species: Wildmouse vs. labmouse -- Differential abundance
+
+```{r species_res}
+res_species <- results(dds, name="species_wildmouse_vs_labmouse")
+res_species <- res_species[order(res_species$pvalue), ]
+
+res_species_sig <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("ko", ortholog)) %>%
+  filter(padj < .05)
+
+res_species_kegg <- res_species %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(grepl("ko", ortholog))
+```
+
+`r nrow(res_species_sig)` genes were significantly differentially abundant between
+wildmouse and labmouse, blocking for diet. `r table(res_species_sig$log2FoldChange > 0)[2]` were more abundant in 
+wildmouse, while `r table(res_species_sig$log2FoldChange > 0)[1]` were more abundant in labmouse.
+
+We can also examine which ortholog pathways are enriched in the differentially
+abundant orthologs.
+
+```{r enrichment_species}
+res_ind <- res_species_sig %>% 
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_ind, showCategory = nrow(enriched_ind@result)) +
+  ggtitle("More abundant in wild diet")
+
+res_rep <- res_species_sig %>% 
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_rep <- enricher(gene = res_rep$ortholog, maxGSSize = 5000,
+                         TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_rep, showCategory = nrow(enriched_rep@result)) +
+  ggtitle("More abundant in chow diet")
+```
+
+```{r write_tsvs}
+write_tsv(res_sig, "outputs/diff_abund/mouse/mouse_diet_kegg_sig.tsv")
+write_tsv(res_kegg, "outputs/diff_abund/mouse/mouse_diet_kegg_all.tsv")
+write_tsv(res_species_sig, "outputs/diff_abund/mouse/mouse_species_kegg_sig.tsv")
+write_tsv(res_species_kegg, "outputs/diff_abund/mouse/mouse_species_kegg_all.tsv")
+```

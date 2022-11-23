@@ -1,0 +1,328 @@
+---
+title: "Canid Diet Experiment KEGG Ortholog Results"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '../')
+knitr::opts_chunk$set(echo = F, include = T, message = F, warning = F, cache = F)
+```
+
+
+```{r libs}
+library(tximport)
+library(readr)
+library(dplyr)
+library(tibble)
+library(magrittr)
+library(ggplot2)
+library(ggrepel)
+library(vegan)
+library(ggbeeswarm)
+library(kableExtra)
+```
+
+```{r download_pathways}
+## download ortholog to pathway table
+pathways <- "http://rest.kegg.jp/link/pathway/ko"
+if(!file.exists("inputs/kegg_pathways.tsv")){
+  download.file(url = pathways, destfile = "inputs/kegg_pathways.tsv")
+}
+pathways <- read_tsv("inputs/kegg_pathways.tsv", col_names = c("KO", "path"))
+pathways <- pathways %>%
+  mutate(KO = gsub("ko:", "", KO)) %>%
+  filter(grepl(pattern = "map", path)) %>%
+  #mutate(path = gsub("path:", "", path)) %>%
+  dplyr::select(path, KO)
+
+pathway_names <- "http://rest.kegg.jp/list/pathway"
+if(!file.exists("inputs/kegg_pathway_names.tsv")){
+  download.file(url = pathway_names, destfile = "inputs/kegg_pathway_names.tsv")
+}
+pathway_names <- read_tsv("inputs/kegg_pathway_names.tsv", col_names = c("path", "name"))
+```
+
++ Note -- selecting just the first kegg ortholog reduces the number of distinct orthologs in txi_kegg from 21,770 to 8923
+
+```{r tximport}
+txi_kegg <- read_tsv("outputs/tx2gene/eggnog_tx2gene_kegg.tsv")
+txi_kegg <- filter(txi_kegg, grepl("K", GENEID))
+# re-make txi_kegg; only keep first ortholog
+txi_kegg <- txi_kegg %>%
+  mutate(GENEID = gsub(",.*", "", GENEID))
+canids <- read_csv("inputs/tximport_samples/canid_samples.csv")
+canid_counts <- tximport(files = canids$filepath, type = "salmon", tx2gene = txi_kegg)
+```
+
+```{r export_counts}
+canid_counts_raw <- canid_counts$counts
+colnames(canid_counts_raw) <- canids$sample
+canid_counts_raw <- as.data.frame(canid_counts_raw)
+canid_counts_raw$ortholog <- rownames(canid_counts_raw)
+#write_tsv(canid_counts_raw, "outputs/ortholog_counts/canid_kegg_counts_raw.tsv")
+```
+
+```{r summarize_to_pathway}
+# summarize from KEGG counts to pathway counts
+pathway_wide  <- left_join(pathways, ko_wide, by = c("KO" = "ko")) %>%
+  select(-KO) %>%
+  group_by(path) %>%
+  mutate(across(everything(), ~replace_na(.x, 0))) %>%
+  summarise(across(everything(), list(sum))) %>%
+  rename_all(~gsub("_1", "", .))
+```
+
+```{r pathway_pca}
+
+```
+
+```{r pathway_permanova}
+vsd_assay <- t(assay(vsd))
+rownames(vsd_assay) <- colData(vsd)$sample
+veg_dist <- vegdist(vsd_assay, "bray")
+
+canids <- canids[match(rownames(vsd_assay), canids$sample), ] # sort info by colnames
+canids$species <- as.factor(canids$species)              # set factors for model
+canids$diet <- as.factor(canids$diet)
+canids$day <- as.factor(canids$day )
+
+perm <- adonis(veg_dist ~ species + diet, 
+               data = canids, 
+               permutations = 10000)
+#write.table(perm$aov.tab, "outputs/permanova/canid_kegg_permanova.tsv", quote = F)
+kable(perm$aov.tab) %>% kable_styling()
+```
+
+
+
+## Looking at species and diet, but controlling for individual
+
+DeSEQ2 allows users to test for group-specific condition effects when individuals nested within groups as occurs in the mouse experiments (reference: http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#group-specific-condition-effects-individuals-nested-within-groups).
+In other words, this allows us to control for changes in individual gut microbiomes between day 7 and day 14.
+This model setup allows us to test:
+1. if the groups (e.g. species) are different, controlling for individual and diet.
+2. if the "condition effect" (e.g. wild diet) is different for different groups (e.g. species). This particular approach compares the log2FC/result values from the contrast `speciesDog.actual_dietwild` and the contrast `speciesWolf.actual_dietwild`. These original contrasts are built from comparing `speciesDog.actual_diet_wild` vs. `speciesDog.actual_diet_chow`. Therefore, because the chow diet is built in via the original contrast, we can only compare the differences between species for the wild diet.
+
+Model:
+```
+~species + species:individual_n + species:diet
+```
+
+### Species
+
+```{r}
+species2 <- results(dds, name = "species_Wolf_vs_Dog", alpha = 0.05)
+species2_sig <- subset(species2, padj < 0.05)
+```
+
+Controlling for individual and diet, `r nrow(species2_sig)` are differentially abundant.
+`r species2_sig %>% as.data.frame() %>% filter(log2FoldChange > 0) %>% nrow()` were more abundant in wolf, while `r species2_sig %>% as.data.frame() %>% filter(log2FoldChange < 0) %>% nrow()` were more abundant in dog.
+
+No pathways were enriched among these orthologs, but the orthologs are listed below.
+
+```{r, eval = F}
+res_ind <- species2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_ind, showCategory = nrow(enriched_ind@result),
+                         font.size = 8) +
+  ggtitle("More abundant in wolf")+
+  theme(plot.title.position = "plot")
+
+res_rep <- species2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_rep <- enricher(gene = res_rep$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_rep, showCategory = nrow(enriched_rep@result),
+                         font.size = 8) +
+  ggtitle("More abundant in dog")+
+  theme(plot.title.position = "plot")
+```
+
+```{r}
+species2_sig %>%
+  as.data.frame() %>%
+  rownames_to_column("ortholog") %>%
+  mutate(ortholog = gsub("ko:", "", ortholog)) %>%
+  select(ortholog, log2FoldChange) %>% 
+  arrange(desc(log2FoldChange)) %>%
+  kable() %>%
+  kable_styling()
+```
+
+### Diet 
+
+```{r}
+#resultsNames(dds3)
+diet2 <- results(dds, contrast=list("speciesDog.dietWild", "speciesWolf.dietWild"),
+                 alpha = 0.05)
+diet2_sig <- subset(diet2, padj < 0.05)
+```
+
+Controlling for individual, `r nrow(diet2_sig)` orthologs are differentially abundant between dog and wolf for wild diet.
+`r diet2_sig %>% as.data.frame() %>% filter(log2FoldChange > 0) %>% nrow()` orthologs were more abundant in dog, while `r diet2_sig %>% as.data.frame() %>% filter(log2FoldChange < 0) %>% nrow()` orthologs were more abundant in wolf.
+
+```{r}
+res_ind <- diet2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_ind <- enricher(gene = res_ind$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_ind, showCategory = nrow(enriched_ind@result),
+                         font.size = 8) +
+  ggtitle("More abundant in dog on wild diet")+
+  theme(plot.title.position = "plot")
+
+res_rep <- diet2_sig %>% 
+  as.data.frame() %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_rep <- enricher(gene = res_rep$ortholog, 
+                         TERM2GENE = pathways, TERM2NAME = pathway_names, maxGSSize = 5000)
+clusterProfiler::dotplot(enriched_rep, showCategory = nrow(enriched_rep@result),
+                         font.size = 8) +
+  ggtitle("More abundant in wolf on wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+The orthologs are listed below.
+
+```{r}
+diet2_sig %>%
+  as.data.frame() %>%
+  rownames_to_column("ortholog") %>%
+  mutate(ortholog = gsub("ko:", "", ortholog)) %>%
+  select(ortholog, log2FoldChange) %>% 
+  arrange(desc(log2FoldChange)) %>%
+  kable() %>%
+  kable_styling()
+```
+
+## Do the species change in reaction to their diets in different amounts?
+
+Instead of comparing across species or across diet, we can also ask what types of changes each species encountered when switching diets, and which changed the most.
+To do this, I defined a new variable, "interaction", which will allow me to compare dog control vs. dog on switched diet, and wolf control vs. wolf on a switched diet. 
+This can't be built into the first model that we used above, as that model would not be full rank. 
+
+
+```{r differential_abundance2, include = F}
+ddsTxi2 <- DESeqDataSetFromTximport(canid_counts,
+                                    colData = canids,
+                                    design = ~ interaction)
+dds2 <- DESeq(ddsTxi2)
+```
+
+
+```{r}
+# resultsNames(dds2) # lists the coefficients
+
+dog <-  results(dds2, name="interaction_dog_switch_vs_dog_ctrl")
+dog_sig <- subset(dog, padj < .05)
+dog$animal <- "dog"
+dog_sig$animal <- "dog"
+wolf <- results(dds2, contrast=c("interaction", "wolf_switch", "wolf_ctrl"))
+wolf_sig <- subset(wolf, padj < .05)
+wolf_sig$animal <- "wolf"
+wolf$animal <- "wolf"
+dog_wolf <- rbind(dog, wolf)
+dog_wolf_sig <- rbind(dog_sig, wolf_sig)
+dog_wolf <- as.data.frame(dog_wolf)
+dog_wolf_sig <- as.data.frame(dog_wolf_sig)
+
+ggplot(data = dog_wolf %>%
+         filter(baseMean != 0)%>%
+         filter(!is.na(padj)), aes(x = animal, y = log2FoldChange, color = abs(padj))) +
+  geom_quasirandom(aes(color = ifelse(abs(padj) < .05, "significant", "non-significant")), alpha = .5) +
+  labs(y = "Species", x = "log2 Fold Change", 
+       title = "Distribution of log2 Fold Change for significant genes", 
+       subtitle = "Dog wild diet vs. dog chow diet, and wolf chow diet vs. wolf wild diet") +
+  theme_classic() +
+  theme(plot.title.position = "plot") +
+  ylim(c(-20, 11)) +
+  guides(color=guide_legend(title="Significance"))
+```
+
+```{r}
+tally_dog_wolf_sig<- dog_wolf_sig %>%
+  mutate(direction = ifelse(log2FoldChange < 0, "down", "up")) %>%
+  group_by(animal, direction) %>%
+  tally()
+
+kable(tally_dog_wolf_sig) %>% kable_styling()
+```
+
+Dog has many more KEGG orthologs that are significantly differentially abundant than wolf.
+This indicates that the functional potential of the dog's gut microbiome changes more on a wild diet than a wolf's does on a chow diet.
+
+Of the orthologs that decrease in abundance for the dog, the following pathways are enriched:
+```{r}
+tmp <- dog_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange < 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_dog_rep <- enricher(gene = tmp$ortholog, maxGSSize = 5000,
+                             TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_dog_rep, font.size = 9, 
+                         showCategory = nrow(enriched_dog_rep@result)) +
+  ggtitle("Less abundant when a dog consumes a wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+Of the orthologs that increase in abundance for the dog, the following pathways are enriched:
+```{r}
+tmp <- dog_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_dog_ind <- enricher(gene = tmp$ortholog, maxGSSize = 5000,
+                             TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_dog_ind, font.size = 9, 
+                         showCategory = nrow(enriched_dog_ind@result)) +
+  ggtitle("More abundant when a dog consumes a wild diet") +
+  theme(plot.title.position = "plot")
+```
+
+Of the orthologs that increase in abundance for the wolf, the following pathways are enriched:
+```{r}
+tmp <- wolf_sig %>%
+  as.data.frame %>%
+  mutate(ortholog = rownames(.)) %>%
+  filter(log2FoldChange > 0) %>%
+  mutate(ortholog = gsub(".*,","", ortholog)) %>% # separate to the last kegg ortholog if multiple are observed
+  mutate(ortholog = gsub("ko:", "", ortholog))
+
+enriched_wolf_ind <- enricher(gene = tmp$ortholog, maxGSSize = 5000,
+                             TERM2GENE = pathways, TERM2NAME = pathway_names)
+clusterProfiler::dotplot(enriched_wolf_ind, font.size = 9, 
+                         showCategory = nrow(enriched_wolf_ind@result)) +
+  ggtitle("More abundant when a wolf consumes a chow diet") +
+  theme(plot.title.position = "plot")
+```
+
+
